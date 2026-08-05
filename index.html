@@ -517,7 +517,10 @@ document.getElementById('logoLanding').src=LOGO_SRC;
 document.getElementById('logoHeader').src=LOGO_SRC;
 function startAssess(){document.getElementById('landingPage').style.display='none';document.getElementById('assessPage').style.display='block';window.scrollTo(0,0);}
 function backToLanding(){document.getElementById('assessPage').style.display='none';document.getElementById('landingPage').style.display='flex';window.scrollTo(0,0);}
-function openManual(){alert('คู่มือการใช้งาน: กรุณาติดต่อผู้ดูแลระบบเพื่อขอรับเอกสาร');return false;}
+function openManual(){
+    window.open("โครงงานคอมพิวเตอร์การใช้AI เพื่อคัดกรองภา.pdf", "_blank");
+    return false;
+}
 document.querySelectorAll('.tab-btn-new').forEach(btn=>{btn.addEventListener('click',()=>{document.querySelectorAll('.tab-btn-new').forEach(b=>b.classList.remove('active'));document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(btn.dataset.tab).classList.add('active');});});
 function newSubjectId(){const d=new Date(),pad=n=>String(n).padStart(2,'0');const y=String(d.getFullYear()).slice(-2),m=pad(d.getMonth()+1),dd=pad(d.getDate()),hh=pad(d.getHours()),mm=pad(d.getMinutes());return`TH${y}${m}${dd}-${hh}${mm}`;}
 document.getElementById('btnNewId').onclick=()=>{document.getElementById('subjectId').value=newSubjectId();};
