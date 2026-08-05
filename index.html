@@ -518,7 +518,10 @@ document.getElementById('logoHeader').src=LOGO_SRC;
 function startAssess(){document.getElementById('landingPage').style.display='none';document.getElementById('assessPage').style.display='block';window.scrollTo(0,0);}
 function backToLanding(){document.getElementById('assessPage').style.display='none';document.getElementById('landingPage').style.display='flex';window.scrollTo(0,0);}
 function openManual(){
-    window.open("โครงงานคอมพิวเตอร์การใช้AI เพื่อคัดกรองภา.pdf", "_blank");
+    window.open(
+        "https://www.canva.com/design/DAHEYN4orA8/jqtbKuXnVPKXmMy1qA0bwA/edit",
+        "_blank"
+    );
     return false;
 }
 document.querySelectorAll('.tab-btn-new').forEach(btn=>{btn.addEventListener('click',()=>{document.querySelectorAll('.tab-btn-new').forEach(b=>b.classList.remove('active'));document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');document.getElementById(btn.dataset.tab).classList.add('active');});});
