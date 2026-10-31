@@ -375,7 +375,7 @@
           <h2>การอัดเสียงแบบทดสอบทางประสาทวิทยา (3 พาร์ท) — WAV 16kHz Mono</h2>
         </div>
         <div class="card-body">
-          <div class="info-note">ระบบจะแปลงไฟล์เสียงเป็นมาตรฐาน WAV 16kHz Mono และอัปโหลดขึ้นเซิร์ฟเวอร์โดยอัตโนมัติภายหลังหยุดอัดเสียง</div>
+          <div class="info-note">ระบบจะแปลงไฟล์เสียงเป็นมาตรฐาน WAV 16kHz Mono ตรวจคุณภาพเสียง และอัปโหลดขึ้นเซิร์ฟเวอร์โดยอัตโนมัติเมื่อครบ 60 วินาที — กรุณาอัดในที่เงียบ ถือโทรศัพท์ห่างปากประมาณ 1 คืบ และพูดด้วยเสียงปกติ</div>
           <div class="rec-part-card">
             <div class="rec-part-title"><span class="badge-part">พาร์ท 1</span>แบบทดสอบคล่องแคล่วทางสัทศาสตร์ — Phonemic Fluency Test (PFT)</div>
             <div class="info-note" style="font-size:.8rem"><b>คำแนะนำ:</b> กรุณาพูดคำศัพท์ภาษาไทยที่ขึ้นต้นด้วยพยัญชนะ <b>"ก"</b> ให้ได้มากที่สุดภายใน 60 วินาที เช่น ไก่ — แกง — กด — การ — เก่ง ...</div>
@@ -541,13 +541,131 @@ document.getElementById('btnCalc').onclick=()=>{let total=0,answered=0;for(let i
 const RESULTS={survey:null,memory:null,animal:null,stroop:null,rt:null};
 const rec={PFT:{chunks:[],blob:null,seconds:0,media:null,timer:null,wav:null},CTD:{chunks:[],blob:null,seconds:0,media:null,timer:null,wav:null},SFT:{chunks:[],blob:null,seconds:0,media:null,timer:null,wav:null}};
 const fmtMMSS=sec=>{const m=String(Math.floor(sec/60)).padStart(2,'0'),s=String(sec%60).padStart(2,'0');return`${m}:${s}`;};
-function attachPart(part){const btnStart=document.querySelector(`.btn[data-part="${part}"][data-action="start"]`);const btnStop=document.querySelector(`.btn[data-part="${part}"][data-action="stop"]`);const timerEl=document.getElementById('timer'+part),audioEl=document.getElementById('audio'+part),infoEl=document.getElementById('info'+part);btnStart.onclick=async()=>{if(!document.getElementById('consent').checked){alert('กรุณายืนยันความยินยอมก่อน');return;}if(rec[part].timer){clearInterval(rec[part].timer);rec[part].timer=null;}rec[part].chunks=[];rec[part].blob=null;rec[part].wav=null;rec[part].seconds=0;let remaining=60;timerEl.textContent=fmtMMSS(remaining);let stream;try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}catch(e){alert('ไม่สามารถเข้าถึงไมโครโฟนได้');return;}const mr=new MediaRecorder(stream,{mimeType:'audio/webm'});rec[part].media=mr;mr.ondataavailable=e=>{if(e.data&&e.data.size>0)rec[part].chunks.push(e.data);};mr.onstop=async()=>{if(rec[part].timer){clearInterval(rec[part].timer);rec[part].timer=null;}stream.getTracks().forEach(t=>t.stop());rec[part].blob=new Blob(rec[part].chunks,{type:'audio/webm'});audioEl.src=URL.createObjectURL(rec[part].blob);audioEl.style.display='block';infoEl.textContent=`ไฟล์ ~ ${(rec[part].blob.size/1024).toFixed(1)} KB — กำลังแปลงเป็น WAV 16kHz...`;try{rec[part].wav=await webmToWav16k(rec[part].blob);infoEl.textContent=`พร้อมส่งให้ AI: ${(rec[part].wav.size/1024).toFixed(1)} KB (WAV 16kHz Mono)`;uploadToDrive(part,rec[part].wav,rec[part].seconds,infoEl);}catch(err){infoEl.textContent='แปลงไฟล์ไม่สำเร็จ: '+err.message;}btnStart.disabled=false;btnStop.disabled=true;};mr.start(100);btnStart.disabled=true;btnStop.disabled=true;rec[part].timer=setInterval(()=>{remaining--;rec[part].seconds++;timerEl.textContent=fmtMMSS(remaining);if(remaining<=0){clearInterval(rec[part].timer);rec[part].timer=null;if(mr.state!=='inactive')mr.stop();}},1000);};}
+/* ===== การอัดเสียง v2: ปิดการแต่งเสียงของเบราว์เซอร์ + เก็บ PCM ดิบ (ไม่ผ่าน Opus) ===== */
+async function startRawCapture(){
+  // สร้าง AudioContext ทันทีตอนกดปุ่ม (ก่อน await ใด ๆ) เพื่อให้ iOS/Chrome ยอมให้เล่น/อัดเสียง
+  const ctx=new(window.AudioContext||window.webkitAudioContext)();
+  const resumed=ctx.resume().catch(()=>{});
+  let stream;
+  try{stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}});}
+  catch(e){try{ctx.close();}catch(_){}throw e;}
+  await Promise.race([resumed,new Promise(r=>setTimeout(r,1500))]);
+  if(ctx.state!=='running')throw new Error('เบราว์เซอร์ไม่อนุญาตให้เริ่มระบบเสียง กรุณากดปุ่มอีกครั้ง');
+  const src=ctx.createMediaStreamSource(stream);const chunks=[];let node;
+  if(ctx.audioWorklet&&window.AudioWorkletNode){
+    try{
+      const code="class R extends AudioWorkletProcessor{process(i){const c=i[0]&&i[0][0];if(c)this.port.postMessage(c.slice(0));return true;}}registerProcessor('raw-rec',R);";
+      await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code],{type:'application/javascript'})));
+      node=new AudioWorkletNode(ctx,'raw-rec');node.port.onmessage=e=>chunks.push(e.data);
+    }catch(e){node=null;}
+  }
+  if(!node){
+    node=ctx.createScriptProcessor(4096,1,1);node.onaudioprocess=e=>chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  }
+  const mute=ctx.createGain();mute.gain.value=0;src.connect(node);node.connect(mute);mute.connect(ctx.destination);
+  const tr=stream.getAudioTracks()[0];const settings=(tr&&tr.getSettings)?tr.getSettings():{};
+  return{stop:async()=>{
+    await new Promise(r=>setTimeout(r,120));
+    try{src.disconnect();node.disconnect();}catch(e){}
+    stream.getTracks().forEach(t=>t.stop());const sr=ctx.sampleRate;try{await ctx.close();}catch(e){}
+    let n=0;chunks.forEach(c=>n+=c.length);const out=new Float32Array(n);let o=0;chunks.forEach(c=>{out.set(c,o);o+=c.length;});
+    return{samples:out,sampleRate:sr,settings};
+  }};
+}
+async function resampleTo16k(x,sr){
+  if(sr===16000)return x;
+  const off=new(window.OfflineAudioContext||window.webkitOfflineAudioContext)(1,Math.ceil(x.length*16000/sr),16000);
+  const buf=off.createBuffer(1,x.length,sr);buf.copyToChannel(x,0);const s=off.createBufferSource();s.buffer=buf;s.connect(off.destination);s.start();
+  return(await off.startRendering()).getChannelData(0);
+}
+/* ===== QC + feature พื้นฐาน (ค่าจากเบราว์เซอร์ = ใช้คัดกรองคุณภาพ; ค่าระดับวิจัยคำนวณใหม่ด้วย Python) ===== */
+const QC_VERSION="qc-js-1.0";
+function analyzeAudio(y,sr){
+  const r3=v=>Math.round(v*1000)/1000,db=v=>20*Math.log10(Math.max(v,1e-10));
+  const N=y.length,dur=N/sr;let peak=0,sum=0,sq=0,clip=0;
+  for(let i=0;i<N;i++){const v=y[i],a=Math.abs(v);if(a>peak)peak=a;sum+=v;sq+=v*v;if(a>=0.999)clip++;}
+  const win=Math.round(0.025*sr),hop=Math.round(0.010*sr),E=[];
+  for(let s=0;s+win<=N;s+=hop){let e=0;for(let i=s;i<s+win;i++)e+=y[i]*y[i];E.push(10*Math.log10(e/win+1e-12));}
+  const sorted=[...E].sort((a,b)=>a-b),pct=p=>sorted.length?sorted[Math.min(sorted.length-1,Math.floor(p*sorted.length))]:-120;
+  const noise=pct(0.10),loud=pct(0.95),thr=noise+Math.max(6,0.3*(loud-noise));
+  // speech mask + เติมช่องว่างสั้น < 150 ms (ระหว่างพยางค์) แล้วตัดเสียงสั้น < 50 ms ออก
+  let m=E.map(e=>e>thr);
+  const runs=mask=>{const R=[];let st=null;mask.forEach((v,i)=>{if(v&&st===null)st=i;if(!v&&st!==null){R.push([st,i]);st=null;}});if(st!==null)R.push([st,mask.length]);return R;};
+  let seg=runs(m).filter(([a,b])=>(b-a)*0.01>=0.05);
+  const merged=[];seg.forEach(s=>{if(merged.length&&(s[0]-merged[merged.length-1][1])*0.01<0.15)merged[merged.length-1][1]=s[1];else merged.push([...s]);});
+  const speechSec=merged.reduce((a,[s,e])=>a+(e-s)*0.01,0);
+  const pauses=[];for(let i=1;i<merged.length;i++){const g=(merged[i][0]-merged[i-1][1])*0.01;if(g>=0.25)pauses.push(g);}
+  const first=merged.length?merged[0][0]*0.01:dur,last=merged.length?merged[merged.length-1][1]*0.01:dur;
+  const span=Math.max(last-first,1e-6);
+  // F0 แบบ autocorrelation (75–400 Hz) เฉพาะเฟรมที่มีเสียงพูด
+  const f0=[],fw=Math.round(0.04*sr),lagMin=Math.floor(sr/400),lagMax=Math.ceil(sr/75);
+  merged.forEach(([a,b])=>{for(let fi=a;fi<b;fi+=2){const s=fi*hop;if(s+fw+lagMax>N)break;
+    let e0=0;for(let i=0;i<fw;i++)e0+=y[s+i]*y[s+i];if(e0<=0)continue;let best=0,bl=0;
+    for(let L=lagMin;L<=lagMax;L++){let c=0,e1=0;for(let i=0;i<fw;i++){c+=y[s+i]*y[s+i+L];e1+=y[s+i+L]*y[s+i+L];}const r=c/Math.sqrt(e0*e1+1e-12);if(r>best){best=r;bl=L;}}
+    if(best>0.6&&bl>0)f0.push(sr/bl);}});
+  const mean=a=>a.reduce((x,v)=>x+v,0)/(a.length||1),sd=a=>{const mu=mean(a);return Math.sqrt(mean(a.map(v=>(v-mu)**2)));};
+  const f0s=[...f0].sort((a,b)=>a-b);
+  const M={
+    QC_Version:QC_VERSION,DurationSec:r3(dur),PeakDBFS:r3(db(peak)),RMS_DBFS:r3(db(Math.sqrt(sq/Math.max(N,1)))),
+    DCOffset:r3(sum/Math.max(N,1)),ClipRatio:Math.round(clip/Math.max(N,1)*1e6)/1e6,
+    NoiseFloorDB:r3(noise),SNR_dB:r3(loud-noise),
+    SpeechSec:r3(speechSec),SilenceRatio:r3(1-speechSec/Math.max(dur,1e-6)),PhonationRatio:r3(speechSec/span),
+    LeadingSilenceSec:r3(first),TrailingSilenceSec:r3(dur-last),SpeechSegments:merged.length,
+    PauseCount:pauses.length,PauseMeanSec:r3(mean(pauses)),PauseMaxSec:r3(pauses.length?Math.max(...pauses):0),
+    PauseTotalSec:r3(pauses.reduce((a,b)=>a+b,0)),LongPauseCount_1s:pauses.filter(p=>p>=1).length,
+    PausesPerMin:r3(pauses.length/(span/60)),
+    F0_MeanHz:r3(mean(f0)),F0_SDHz:r3(sd(f0)),F0_MedianHz:r3(f0s.length?f0s[Math.floor(f0s.length/2)]:0),F0_Frames:f0.length
+  };
+  const fail=[],warn=[];
+  if(M.SpeechSec<3)fail.push('แทบไม่มีเสียงพูด');
+  if(M.ClipRatio>0.005)fail.push('เสียงแตก (ดังเกินไป)');else if(M.ClipRatio>0.0005)warn.push('มีเสียงแตกบางช่วง');
+  if(M.SNR_dB<10)fail.push('เสียงรบกวนมาก');else if(M.SNR_dB<20)warn.push('มีเสียงรบกวนพอสมควร');
+  if(M.RMS_DBFS<-50)fail.push('เสียงเบามาก');else if(M.RMS_DBFS<-40)warn.push('เสียงค่อนข้างเบา');
+  if(M.DurationSec<50)warn.push('อัดไม่ครบ 60 วินาที');
+  M.QC_Status=fail.length?'FAIL':warn.length?'WARN':'PASS';M.QC_Reasons=fail.concat(warn).join(', ');
+  return M;
+}
+function qcHtml(M){
+  const col=M.QC_Status==='PASS'?'#166534':M.QC_Status==='WARN'?'#b45309':'#b91c1c';
+  const msg=M.QC_Status==='PASS'?'คุณภาพเสียงใช้ได้':M.QC_Status==='WARN'?'ใช้ได้ แต่ควรระวัง: '+M.QC_Reasons:'ควรอัดใหม่: '+M.QC_Reasons;
+  return`<div style="margin-top:6px"><b style="color:${col}">${M.QC_Status==='FAIL'?'⚠️':'✔'} ${msg}</b></div>`+
+  `<div class="muted-txt" style="font-size:.75rem">พูด ${M.SpeechSec}s / ${M.DurationSec}s • หยุด ${M.PauseCount} ครั้ง (≥1s: ${M.LongPauseCount_1s}) • SNR ${M.SNR_dB} dB • ระดับเสียง ${M.RMS_DBFS} dBFS</div>`;
+}
+function attachPart(part){
+  const btnStart=document.querySelector(`.btn[data-part="${part}"][data-action="start"]`);
+  const btnStop=document.querySelector(`.btn[data-part="${part}"][data-action="stop"]`);
+  const timerEl=document.getElementById('timer'+part),audioEl=document.getElementById('audio'+part),infoEl=document.getElementById('info'+part);
+  btnStart.onclick=async()=>{
+    if(!document.getElementById('consent').checked){alert('กรุณายืนยันความยินยอมก่อน');return;}
+    if(rec[part].timer){clearInterval(rec[part].timer);rec[part].timer=null;}
+    rec[part].blob=null;rec[part].wav=null;rec[part].seconds=0;rec[part].qc=null;
+    let cap;try{cap=await startRawCapture();}catch(e){alert('ไม่สามารถเข้าถึงไมโครโฟนได้: '+e.message);return;}
+    let remaining=60,done=false;timerEl.textContent=fmtMMSS(remaining);infoEl.textContent='กำลังอัดเสียง...';
+    btnStart.disabled=true;btnStop.disabled=true;
+    const finish=async()=>{
+      if(done)return;done=true;if(rec[part].timer){clearInterval(rec[part].timer);rec[part].timer=null;}
+      infoEl.textContent='กำลังแปลงเป็น WAV 16kHz และตรวจคุณภาพเสียง...';
+      try{
+        const{samples,sampleRate,settings}=await cap.stop();
+        const y=await resampleTo16k(samples,sampleRate);
+        rec[part].wav=encodeWAV(floatTo16BitPCM(y),16000);rec[part].blob=rec[part].wav;
+        audioEl.src=URL.createObjectURL(rec[part].wav);audioEl.style.display='block';
+        const M=analyzeAudio(y,16000);
+        M.CaptureSampleRate=sampleRate;M.Mic_EchoCancellation=String(settings.echoCancellation);
+        M.Mic_NoiseSuppression=String(settings.noiseSuppression);M.Mic_AutoGain=String(settings.autoGainControl);
+        rec[part].qc=M;infoEl.innerHTML=qcHtml(M);
+        uploadToDrive(part,rec[part].wav,rec[part].seconds,infoEl);
+      }catch(err){infoEl.textContent='แปลงไฟล์ไม่สำเร็จ: '+err.message;}
+      btnStart.disabled=false;
+    };
+    rec[part].timer=setInterval(()=>{remaining--;rec[part].seconds++;timerEl.textContent=fmtMMSS(remaining);if(remaining<=0)finish();},1000);
+  };
+}
 ['PFT','CTD','SFT'].forEach(attachPart);
-async function webmToWav16k(blob){const ab=await blob.arrayBuffer();const on=new(window.AudioContext||window.webkitAudioContext)();const dec=await on.decodeAudioData(ab);const ch=dec.getChannelData(0),sr=dec.sampleRate;on.close();const dr=16000;const off=new(window.OfflineAudioContext||window.webkitOfflineAudioContext)(1,Math.ceil(ch.length*dr/sr),dr);const buf=off.createBuffer(1,ch.length,sr);buf.copyToChannel(ch,0);const s=off.createBufferSource();s.buffer=buf;s.connect(off.destination);s.start();const r=await off.startRendering();return encodeWAV(floatTo16BitPCM(r.getChannelData(0)),dr);}
 function floatTo16BitPCM(f){const o=new Int16Array(f.length);for(let i=0;i<f.length;i++){let s=Math.max(-1,Math.min(1,f[i]));o[i]=s<0?s*0x8000:s*0x7FFF;}return o;}
 function encodeWAV(i16,sr=16000){const br=sr*2,ba=2,buf=new ArrayBuffer(44+i16.length*2),v=new DataView(buf);const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};w(0,"RIFF");v.setUint32(4,36+i16.length*2,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,sr,true);v.setUint32(28,br,true);v.setUint16(32,ba,true);v.setUint16(34,16,true);w(36,"data");v.setUint32(40,i16.length*2,true);for(let i=0,off=44;i<i16.length;i++,off+=2)v.setInt16(off,i16[i],true);return new Blob([v],{type:"audio/wav"});}
 function blobToBase64(blob){return new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=rej;fr.readAsDataURL(blob);});}
-async function uploadToDrive(part,wavBlob,seconds,infoEl){try{const sid=document.getElementById('subjectId').value||'Unknown',gender=(document.getElementById('gender')||{}).value||'',education=(document.getElementById('education')||{}).value||'',accent=(document.getElementById('accent')||{}).value||'',age=(document.getElementById('age')||{}).value||'';const now=new Date(),pad=n=>String(n).padStart(2,'0');const dt=`${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;const filename=`${sid}_${part}_${dt}.wav`;const dataUrl=await blobToBase64(wavBlob);const meta={Filename:filename,SubjectID:sid,Task:part,Gender:gender,Education:education,RegionAccent:accent,Age:age,DurationSec:seconds,AvgRMS:null,SilenceRatio:null,ClipCount:null,Recorder:navigator.userAgent,DateTimeISO:new Date().toISOString(),AudioBase64:dataUrl};let resp=await fetch(WEBAPP_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(Object.assign({type:"audio"},meta))});if(!resp.ok){await fetch(WEBAPP_URL,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(Object.assign({type:"audio"},meta))});if(infoEl)infoEl.innerHTML+=` &nbsp;<b style="color:#166534">✔ อัปโหลดสำเร็จ</b>`;return;}const js=await resp.json().catch(()=>({}));if(infoEl){const lnk=js.url?` <a href="${js.url}" target="_blank" rel="noopener" style="color:var(--navy-500)">เปิดใน Drive</a>`:"";infoEl.innerHTML+=` &nbsp;<b style="color:#166534">✔ อัปโหลดสำเร็จ</b>${lnk}`;}}catch(err){if(infoEl)infoEl.innerHTML+=` &nbsp;<span style="color:#b91c1c">อัปโหลดล้มเหลว: ${err.message}</span>`;}}
+async function uploadToDrive(part,wavBlob,seconds,infoEl){try{const sid=document.getElementById('subjectId').value||'Unknown',gender=(document.getElementById('gender')||{}).value||'',education=(document.getElementById('education')||{}).value||'',accent=(document.getElementById('accent')||{}).value||'',age=(document.getElementById('age')||{}).value||'';const now=new Date(),pad=n=>String(n).padStart(2,'0');const dt=`${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;const filename=`${sid}_${part}_${dt}.wav`;const dataUrl=await blobToBase64(wavBlob);const meta={Filename:filename,SubjectID:sid,Task:part,Gender:gender,Education:education,RegionAccent:accent,Age:age,DurationSec:seconds,Recorder:navigator.userAgent,DateTimeISO:new Date().toISOString(),Metrics:rec[part].qc||{},AudioBase64:dataUrl};let resp=await fetch(WEBAPP_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(Object.assign({type:"audio"},meta))});if(!resp.ok){await fetch(WEBAPP_URL,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(Object.assign({type:"audio"},meta))});if(infoEl)infoEl.innerHTML+=` &nbsp;<b style="color:#166534">✔ อัปโหลดสำเร็จ</b>`;return;}const js=await resp.json().catch(()=>({}));if(infoEl){const lnk=js.url?` <a href="${js.url}" target="_blank" rel="noopener" style="color:var(--navy-500)">เปิดใน Drive</a>`:"";infoEl.innerHTML+=` &nbsp;<b style="color:#166534">✔ อัปโหลดสำเร็จ</b>${lnk}`;}}catch(err){if(infoEl)infoEl.innerHTML+=` &nbsp;<span style="color:#b91c1c">อัปโหลดล้มเหลว: ${err.message}</span>`;}}
 document.getElementById('btnPredict').onclick=async()=>{const outEl=document.getElementById('predJson'),badge=document.getElementById('predBadge');badge.innerHTML="";outEl.textContent="";const pft=rec.PFT.wav,ctd=rec.CTD.wav,sft=rec.SFT.wav;if(!pft||!ctd||!sft){outEl.textContent="กรุณาอัดครบทั้ง 3 พาร์ทก่อน";return;}try{const fd=new FormData();fd.append('pft',new File([pft],'pft.wav',{type:'audio/wav'}));fd.append('ctd',new File([ctd],'ctd.wav',{type:'audio/wav'}));fd.append('sft',new File([sft],'sft.wav',{type:'audio/wav'}));outEl.textContent="กำลังส่งข้อมูลไปยัง AI Server...";const res=await fetch(PREDICT_URL,{method:'POST',body:fd});const js=await res.json();outEl.textContent=JSON.stringify(js,null,2);const d=(js.decision||"").toLowerCase();let html='<span class="badge-ok">ไม่มีความเสี่ยง (Normal)</span>';if(d.includes("risk")||d.includes("เสี่ยง"))html='<span class="badge-warn">มีความเสี่ยง</span>';if(d.includes("dementia")||d.includes("เป็น"))html='<span class="badge-bad">เข้าข่ายภาวะสมองเสื่อม</span>';badge.innerHTML=`ผลสรุปการวิเคราะห์: ${html}`;}catch(err){outEl.textContent="ไม่สามารถเชื่อมต่อกับ AI Server ได้: "+err.message;}};
 const WORD_BANK=["ดอกไม้","ช้อน","หนังสือ","นาฬิกา","โทรศัพท์","เก้าอี้","หมวก","สะพาน","ภูเขา","แม่น้ำ"];
 let curWords=[],memTimer=null,memAnswerTimer=null;
@@ -577,7 +695,7 @@ rtStop.addEventListener('click',rtReset);
 rtReset();
 
 /* ===== ส่งข้อมูลแบบฟอร์ม/ผลแบบทดสอบ ไปยัง Google Sheet (บันทึกทับแถวเดิมตาม SubjectID) ===== */
-const APP_VERSION="2026-10-31";
+const APP_VERSION="2026-10-31b";
 function collectForm(){
   const v=id=>((document.getElementById(id)||{}).value||'').trim();
   const d={SubjectID:v('subjectId')||'Unknown',Consent:document.getElementById('consent').checked?'yes':'no',
